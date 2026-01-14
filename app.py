@@ -4,7 +4,10 @@ import numpy as np
 import folium
 from folium.plugins import MarkerCluster, HeatMap
 from streamlit_folium import st_folium
+
+# =====================================================
 # CONFIG
+# =====================================================
 st.set_page_config(page_title="Prescriptive Map", layout="wide")
 st.title("🚚 Prescriptive Map – Last-mile Delivery 🚚")
 
@@ -28,16 +31,20 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# =====================================================
 # LOAD DATA
+# =====================================================
 @st.cache_data
 def load_data():
     return pd.read_parquet("eta_region_geo.parquet")
 
 eta_region_geo = load_data()
 
-K = 3  # top K regions / city (fixed)
+K = 3  # top K regions / city
 
+# =====================================================
 # SIDEBAR – CONTROLS
+# =====================================================
 st.sidebar.markdown("## ⚙️ Operational Settings")
 
 viz_date = st.sidebar.selectbox(
@@ -77,11 +84,11 @@ SLA_ETA_MINUTES = st.sidebar.slider(
     step=5
 )
 
-st.sidebar.caption(
-    "💡 Tip: Increase capacity or total couriers to reduce SLA risk."
-)
+st.sidebar.caption("💡 Tip: Increase capacity or total couriers to reduce SLA risk.")
 
-# PRESCRIPTIVE LOGIC
+# =====================================================
+# PRESCRIPTIVE LOGIC 
+# =====================================================
 def build_prescriptive_decisions(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
 
@@ -105,12 +112,22 @@ def build_prescriptive_decisions(df_in: pd.DataFrame) -> pd.DataFrame:
     df["rec_couriers"] = np.floor(
         df["rec_couriers"] * scale
     ).astype(int)
+    
+    df["courier_gap"] = df["rec_couriers"] - df["rec_couriers_raw"]
+    
+    df["eta_adjusted"] = df["expected_eta"] * (
+        df["rec_couriers_raw"] / (df["rec_couriers"] + 1)
+    )
 
-    # --- priority score
+    df["eta_p90_adjusted"] = df["expected_eta_p90"] * (
+        df["rec_couriers_raw"] / (df["rec_couriers"] + 1)
+    )
+
+    # --- priority score (ETA đã điều chỉnh)
     d_norm = df.groupby("city")["demand_mean"].transform(
         lambda x: (x - x.min()) / (x.max() - x.min() + 1e-9)
     )
-    e_norm = df.groupby("city")["expected_eta"].transform(
+    e_norm = df.groupby("city")["eta_adjusted"].transform(
         lambda x: (x - x.min()) / (x.max() - x.min() + 1e-9)
     )
 
@@ -124,12 +141,14 @@ def build_prescriptive_decisions(df_in: pd.DataFrame) -> pd.DataFrame:
         np.where(df["priority_score"] <= q_lo, "DE-PRIORITIZE", "MAINTAIN")
     )
 
-    # --- SLA risk
-    df["sla_risk"] = (df["expected_eta_p90"] > SLA_ETA_MINUTES).astype(int)
+    # --- SLA risk (ETA p90 đã điều chỉnh)
+    df["sla_risk"] = (df["eta_p90_adjusted"] > SLA_ETA_MINUTES).astype(int)
 
     return df
-    
+
+# =====================================================
 # DATA – TOP K PER CITY
+# =====================================================
 df_day = (
     eta_region_geo.query("date == @viz_date")
     .sort_values(["city", "demand_mean"], ascending=[True, False])
@@ -140,14 +159,18 @@ df_day = (
 
 df_day = build_prescriptive_decisions(df_day)
 
+# =====================================================
 # BASE MAP
+# =====================================================
 m = folium.Map(
     location=[df_day["lat"].mean(), df_day["lng"].mean()],
     zoom_start=5,
     tiles="cartodbpositron"
 )
 
+# =====================================================
 # MAP TITLE BOX
+# =====================================================
 n_city = df_day["city"].nunique()
 k_real = int(df_day.groupby("city")["region_id"].nunique().max())
 
@@ -166,7 +189,9 @@ m.get_root().html.add_child(folium.Element(f"""
 </div>
 """))
 
+# =====================================================
 # A) PRIORITY
+# =====================================================
 priority_layer = folium.FeatureGroup(
     name="A) Priority (action + score)", show=True
 )
@@ -185,12 +210,19 @@ for _, r in df_day.iterrows():
         color=color_action[r.action],
         fill=True,
         fill_opacity=0.65,
-        tooltip=f"{r.city} | R{r.region_id} | {r.action} | score={r.priority_score:.2f}"
+        tooltip=(
+            f"{r.city} | R{r.region_id}<br>"
+            f"{r.action} | score={r.priority_score:.2f}<br>"
+            f"ETA adj: {r.eta_adjusted:.0f} min<br>"
+            f"Courier gap: {int(r.courier_gap)}"
+        )
     ).add_to(mc_a)
 
 priority_layer.add_to(m)
 
+# =====================================================
 # B) CAPACITY
+# =====================================================
 capacity_layer = folium.FeatureGroup(
     name="B) Capacity (recommended couriers)", show=False
 )
@@ -205,12 +237,19 @@ for _, r in df_day.iterrows():
         color="black",
         fill=True,
         fill_opacity=0.5,
-        tooltip=f"{r.city} | R{r.region_id} | couriers={int(r.rec_couriers)}"
+        tooltip=(
+            f"{r.city} | R{r.region_id}<br>"
+            f"Needed: {int(r.rec_couriers_raw)}<br>"
+            f"Assigned: {int(r.rec_couriers)}<br>"
+            f"Gap: {int(r.courier_gap)}"
+        )
     ).add_to(mc_b)
 
 capacity_layer.add_to(m)
 
+# =====================================================
 # C) RISK
+# =====================================================
 risk_layer = folium.FeatureGroup(
     name="C) Risk (ETA p90 > SLA?)", show=False
 )
@@ -224,12 +263,18 @@ for _, r in df_day.iterrows():
         color=col,
         fill=True,
         fill_opacity=0.75,
-        tooltip=f"{r.city} | R{r.region_id} | ETA_p90={r.expected_eta_p90:.0f}"
+        tooltip=(
+            f"{r.city} | R{r.region_id}<br>"
+            f"ETA p90 adj: {r.eta_p90_adjusted:.0f}<br>"
+            f"SLA: {SLA_ETA_MINUTES}"
+        )
     ).add_to(mc_c)
 
 risk_layer.add_to(m)
 
+# =====================================================
 # D) HEATMAP
+# =====================================================
 heat_layer = folium.FeatureGroup(
     name="D) Heatmap (priority pressure)", show=False
 )
@@ -237,7 +282,9 @@ heat_data = [[r.lat, r.lng, r.priority_score] for _, r in df_day.iterrows()]
 HeatMap(heat_data, radius=22, blur=18, min_opacity=0.25).add_to(heat_layer)
 heat_layer.add_to(m)
 
+# =====================================================
 # E) PERSISTENCE
+# =====================================================
 persist_layer = folium.FeatureGroup(
     name="E) Persistence (count of PRIORITIZE days)", show=False
 )
@@ -275,6 +322,8 @@ for _, r in persist.iterrows():
 
 persist_layer.add_to(m)
 
+# =====================================================
 # RENDER
+# =====================================================
 folium.LayerControl(collapsed=False).add_to(m)
 st_folium(m, use_container_width=True, height=650)
