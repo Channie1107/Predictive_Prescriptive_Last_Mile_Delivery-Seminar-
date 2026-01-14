@@ -5,9 +5,7 @@ import folium
 from folium.plugins import MarkerCluster, HeatMap
 from streamlit_folium import st_folium
 
-# =====================================================
 # CONFIG
-# =====================================================
 st.set_page_config(page_title="Prescriptive Map", layout="wide")
 st.title("🚚 Prescriptive Map – Last-mile Delivery 🚚")
 
@@ -31,9 +29,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# =====================================================
 # LOAD DATA
-# =====================================================
 @st.cache_data
 def load_data():
     return pd.read_parquet("eta_region_geo.parquet")
@@ -42,9 +38,7 @@ eta_region_geo = load_data()
 
 K = 3  # top K regions / city
 
-# =====================================================
 # SIDEBAR – CONTROLS
-# =====================================================
 st.sidebar.markdown("## ⚙️ Operational Settings")
 
 viz_date = st.sidebar.selectbox(
@@ -86,9 +80,7 @@ SLA_ETA_MINUTES = st.sidebar.slider(
 
 st.sidebar.caption("💡 Tip: Increase capacity or total couriers to reduce SLA risk.")
 
-# =====================================================
 # PRESCRIPTIVE LOGIC 
-# =====================================================
 def build_prescriptive_decisions(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
 
@@ -145,10 +137,8 @@ def build_prescriptive_decisions(df_in: pd.DataFrame) -> pd.DataFrame:
     df["sla_risk"] = (df["eta_p90_adjusted"] > SLA_ETA_MINUTES).astype(int)
 
     return df
-
-# =====================================================
+    
 # DATA – TOP K PER CITY
-# =====================================================
 df_day = (
     eta_region_geo.query("date == @viz_date")
     .sort_values(["city", "demand_mean"], ascending=[True, False])
@@ -159,18 +149,14 @@ df_day = (
 
 df_day = build_prescriptive_decisions(df_day)
 
-# =====================================================
 # BASE MAP
-# =====================================================
 m = folium.Map(
     location=[df_day["lat"].mean(), df_day["lng"].mean()],
     zoom_start=5,
     tiles="cartodbpositron"
 )
 
-# =====================================================
 # MAP TITLE BOX
-# =====================================================
 n_city = df_day["city"].nunique()
 k_real = int(df_day.groupby("city")["region_id"].nunique().max())
 
@@ -189,9 +175,7 @@ m.get_root().html.add_child(folium.Element(f"""
 </div>
 """))
 
-# =====================================================
 # A) PRIORITY
-# =====================================================
 priority_layer = folium.FeatureGroup(
     name="A) Priority (action + score)", show=True
 )
@@ -220,9 +204,7 @@ for _, r in df_day.iterrows():
 
 priority_layer.add_to(m)
 
-# =====================================================
 # B) CAPACITY
-# =====================================================
 capacity_layer = folium.FeatureGroup(
     name="B) Capacity (recommended couriers)", show=False
 )
@@ -247,9 +229,7 @@ for _, r in df_day.iterrows():
 
 capacity_layer.add_to(m)
 
-# =====================================================
 # C) RISK
-# =====================================================
 risk_layer = folium.FeatureGroup(
     name="C) Risk (ETA p90 > SLA?)", show=False
 )
@@ -272,9 +252,7 @@ for _, r in df_day.iterrows():
 
 risk_layer.add_to(m)
 
-# =====================================================
 # D) HEATMAP
-# =====================================================
 heat_layer = folium.FeatureGroup(
     name="D) Heatmap (priority pressure)", show=False
 )
@@ -282,9 +260,7 @@ heat_data = [[r.lat, r.lng, r.priority_score] for _, r in df_day.iterrows()]
 HeatMap(heat_data, radius=22, blur=18, min_opacity=0.25).add_to(heat_layer)
 heat_layer.add_to(m)
 
-# =====================================================
 # E) PERSISTENCE
-# =====================================================
 persist_layer = folium.FeatureGroup(
     name="E) Persistence (count of PRIORITIZE days)", show=False
 )
@@ -322,8 +298,6 @@ for _, r in persist.iterrows():
 
 persist_layer.add_to(m)
 
-# =====================================================
 # RENDER
-# =====================================================
 folium.LayerControl(collapsed=False).add_to(m)
 st_folium(m, use_container_width=True, height=650)
