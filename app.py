@@ -28,25 +28,85 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# LOAD DATA
 @st.cache_data
 def load_data():
     return pd.read_parquet("eta_region_geo.parquet")
 
 eta_region_geo = load_data()
 
-# CONSTANTS
-CAPACITY_PER_COURIER = 30
-SLA_ETA_MINUTES = 60
-K = 3
+K = 3  # top K regions / city (fixed)
+
+# SIDEBAR – CONTROLS
+st.sidebar.markdown("## ⚙️ Operational Settings")
+
+viz_date = st.sidebar.selectbox(
+    "Date",
+    sorted(eta_region_geo["date"].astype(str).unique())
+)
+
+TOTAL_COURIER_PER_CITY = st.sidebar.number_input(
+    "Total couriers per city / day",
+    min_value=20,
+    max_value=500,
+    value=120,
+    step=10
+)
+
+MAX_COURIER_PER_REGION = st.sidebar.number_input(
+    "Max couriers per region",
+    min_value=5,
+    max_value=100,
+    value=40,
+    step=5
+)
+
+CAPACITY_PER_COURIER = st.sidebar.slider(
+    "Capacity per courier (orders/day)",
+    min_value=5,
+    max_value=60,
+    value=25,
+    step=5
+)
+
+SLA_ETA_MINUTES = st.sidebar.slider(
+    "SLA threshold – ETA p90 (minutes)",
+    min_value=30,
+    max_value=180,
+    value=60,
+    step=5
+)
+
+st.sidebar.caption(
+    "💡 Tip: Increase capacity or total couriers to reduce SLA risk."
+)
 
 # PRESCRIPTIVE LOGIC
 def build_prescriptive_decisions(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
 
-    df["rec_couriers"] = np.ceil(
+    # --- raw demand-based couriers
+    df["rec_couriers_raw"] = np.ceil(
         df["demand_mean"] / CAPACITY_PER_COURIER
+    )
+
+    # --- cap per region
+    df["rec_couriers"] = df["rec_couriers_raw"].clip(
+        upper=MAX_COURIER_PER_REGION
+    )
+
+    # --- cap per city
+    city_sum = df.groupby("city")["rec_couriers"].transform("sum")
+    scale = np.minimum(
+        1,
+        TOTAL_COURIER_PER_CITY / city_sum.replace(0, np.inf)
+    )
+
+    df["rec_couriers"] = np.floor(
+        df["rec_couriers"] * scale
     ).astype(int)
 
+    # --- priority score
     d_norm = df.groupby("city")["demand_mean"].transform(
         lambda x: (x - x.min()) / (x.max() - x.min() + 1e-9)
     )
@@ -64,12 +124,12 @@ def build_prescriptive_decisions(df_in: pd.DataFrame) -> pd.DataFrame:
         np.where(df["priority_score"] <= q_lo, "DE-PRIORITIZE", "MAINTAIN")
     )
 
+    # --- SLA risk
     df["sla_risk"] = (df["expected_eta_p90"] > SLA_ETA_MINUTES).astype(int)
-    return df
 
-# SIDEBAR
-viz_date = st.sidebar.selectbox( "Date", sorted(eta_region_geo["date"].astype(str).unique()) )
-# DATA – TOP K FIXED
+    return df
+    
+# DATA – TOP K PER CITY
 df_day = (
     eta_region_geo.query("date == @viz_date")
     .sort_values(["city", "demand_mean"], ascending=[True, False])
@@ -87,7 +147,7 @@ m = folium.Map(
     tiles="cartodbpositron"
 )
 
-# TITLE BOX TRONG MAP
+# MAP TITLE BOX
 n_city = df_day["city"].nunique()
 k_real = int(df_day.groupby("city")["region_id"].nunique().max())
 
@@ -99,8 +159,10 @@ m.get_root().html.add_child(folium.Element(f"""
   <b>Prescriptive Maps (All Cities)</b><br/>
   Date: <b>{viz_date}</b><br/>
   Coverage: <b>{n_city} cities × top {k_real} regions</b><br/>
-  CAPACITY_PER_COURIER: <b>{CAPACITY_PER_COURIER}</b> orders/courier/day<br/>
-  SLA threshold (ETA p90): <b>{SLA_ETA_MINUTES} min</b>
+  Total couriers / city: <b>{TOTAL_COURIER_PER_CITY}</b><br/>
+  Max couriers / region: <b>{MAX_COURIER_PER_REGION}</b><br/>
+  Capacity / courier: <b>{CAPACITY_PER_COURIER}</b><br/>
+  SLA (ETA p90): <b>{SLA_ETA_MINUTES} min</b>
 </div>
 """))
 
@@ -121,7 +183,8 @@ for _, r in df_day.iterrows():
         location=[r.lat, r.lng],
         radius=6 + 14 * r.priority_score,
         color=color_action[r.action],
-        fill=True, fill_opacity=0.65,
+        fill=True,
+        fill_opacity=0.65,
         tooltip=f"{r.city} | R{r.region_id} | {r.action} | score={r.priority_score:.2f}"
     ).add_to(mc_a)
 
@@ -140,7 +203,8 @@ for _, r in df_day.iterrows():
         location=[r.lat, r.lng],
         radius=rad,
         color="black",
-        fill=True, fill_opacity=0.5,
+        fill=True,
+        fill_opacity=0.5,
         tooltip=f"{r.city} | R{r.region_id} | couriers={int(r.rec_couriers)}"
     ).add_to(mc_b)
 
@@ -158,7 +222,8 @@ for _, r in df_day.iterrows():
         location=[r.lat, r.lng],
         radius=7,
         color=col,
-        fill=True, fill_opacity=0.75,
+        fill=True,
+        fill_opacity=0.75,
         tooltip=f"{r.city} | R{r.region_id} | ETA_p90={r.expected_eta_p90:.0f}"
     ).add_to(mc_c)
 
@@ -168,12 +233,10 @@ risk_layer.add_to(m)
 heat_layer = folium.FeatureGroup(
     name="D) Heatmap (priority pressure)", show=False
 )
-heat_data = [
-    [r.lat, r.lng, r.priority_score]
-    for _, r in df_day.iterrows()
-]
+heat_data = [[r.lat, r.lng, r.priority_score] for _, r in df_day.iterrows()]
 HeatMap(heat_data, radius=22, blur=18, min_opacity=0.25).add_to(heat_layer)
 heat_layer.add_to(m)
+
 # E) PERSISTENCE
 persist_layer = folium.FeatureGroup(
     name="E) Persistence (count of PRIORITIZE days)", show=False
@@ -198,11 +261,6 @@ persist = (
     )
 )
 
-persist["prioritize_rate"] = (
-    persist["prioritize_days"] /
-    persist["total_days"].clip(lower=1)
-)
-
 max_days = max(1, int(persist["prioritize_days"].max()))
 for _, r in persist.iterrows():
     rad = 4 + 18 * (r.prioritize_days / max_days)
@@ -210,12 +268,13 @@ for _, r in persist.iterrows():
         location=[r.lat, r.lng],
         radius=rad,
         color="purple",
-        fill=True, fill_opacity=0.55,
+        fill=True,
+        fill_opacity=0.55,
         tooltip=f"{r.city} | R{r.region_id} | {int(r.prioritize_days)}/{int(r.total_days)}"
     ).add_to(persist_layer)
 
 persist_layer.add_to(m)
 
-# CONTROLS + RENDER
+# RENDER
 folium.LayerControl(collapsed=False).add_to(m)
 st_folium(m, use_container_width=True, height=650)
